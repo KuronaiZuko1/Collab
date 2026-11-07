@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BANDI — Trading Intelligence & Economic Alert Platform</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-logo">🤖</div>
+        <div>
+          <h1 class="brand-title">BANDI</h1>
+          <p class="brand-subtitle">Automated Trading Intelligence & Macro Alert Engine</p>
+        </div>
+      </div>
+      <div class="header-center">
+        <div class="clock-badge">
+          <span class="clock-label">SAST (UTC+2)</span>
+          <span id="sast-clock" class="clock-value">--:--:--</span>
+        </div>
+        <div class="clock-badge">
+          <span class="clock-label">UTC</span>
+          <span id="utc-clock" class="clock-value">--:--:--</span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button id="btn-test-tg" class="btn btn-outline" title="Send a test message to Telegram">
+          <span>🔔</span> Test Telegram
+        </button>
+        <button id="btn-sync-cal" class="btn btn-outline" title="Sync latest events from economic calendar">
+          <span>🔄</span> Sync Calendar
+        </button>
+        <button id="btn-compile-ea" class="btn btn-primary" title="Compile Bandi.mq5 to all MT5 terminals">
+          <span>⚡</span> Compile MT5 EA
+        </button>
+      </div>
+    </header>
+
+    <!-- Hero Countdown Banner -->
+    <section class="hero-banner">
+      <div class="next-release-card">
+        <div class="release-header">
+          <span class="badge badge-alert">NEXT HIGH-IMPACT RELEASE</span>
+          <span id="next-release-currency" class="badge badge-currency">USD</span>
+        </div>
+        <h2 id="next-release-title" class="release-title">Scanning economic calendar...</h2>
+        <div class="release-meta">
+          <div><strong>Scheduled:</strong> <span id="next-release-time">Checking...</span></div>
+          <div><strong>Instruments:</strong> <span id="next-release-instruments">Forex / Gold / Indices</span></div>
+        </div>
+        <p id="next-release-why" class="release-why">Evaluating upcoming market catalysts...</p>
+      </div>
+      <div class="countdown-card">
+        <div class="countdown-label">TIME UNTIL RELEASE</div>
+        <div id="countdown-display" class="countdown-timer">--:--:--</div>
+        <div class="countdown-subtext">30-Minute Telegram Alert Guard: <strong>ACTIVE</strong></div>
+      </div>
+    </section>
+
+    <!-- Status KPI Grid -->
+    <section class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">Telegram Alert Engine</div>
+        <div id="tg-status-val" class="kpi-val text-success">Connecting...</div>
+        <div id="tg-status-sub" class="kpi-sub">Bot: checking</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">MetaTrader 5 Bridge</div>
+        <div id="mt5-status-val" class="kpi-val text-warning">Monitoring</div>
+        <div id="mt5-status-sub" class="kpi-sub">Bandi.ex5 Ready</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Deterministic Risk Guard</div>
+        <div class="kpi-val text-info">LOCKED (Read-Only)</div>
+        <div class="kpi-sub">Live Trading Execution Guarded</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Scheduled Releases</div>
+        <div id="total-events-val" class="kpi-val text-primary">--</div>
+        <div class="kpi-sub">Within Next 7 Days</div>
+      </div>
+    </section>
+
+    <!-- Main Navigation Tabs -->
+    <nav class="tab-nav">
+      <button class="tab-btn active" data-tab="calendar">📅 Economic Calendar</button>
+      <button class="tab-btn" data-tab="alerts">🔔 Notification History</button>
+      <button class="tab-btn" data-tab="watchlist">📊 Market Watchlist & Strength</button>
+      <button class="tab-btn" data-tab="research">🧠 Fundamental Research</button>
+      <button class="tab-btn" data-tab="journal">📓 Trading Journal</button>
+      <button class="tab-btn" data-tab="logs">📜 System Logs</button>
+    </nav>
+
+    <!-- Tab Contents -->
+    <main class="tab-content">
+      <!-- 1. Calendar Tab -->
+      <section id="tab-calendar" class="tab-pane active">
+        <div class="pane-header">
+          <h3>Scheduled Economic Releases</h3>
+          <div class="pane-controls">
+            <label><input type="checkbox" id="filter-high-impact" checked> High Impact Only</label>
+            <input type="text" id="search-events" placeholder="Search event or currency..." class="input-search">
+          </div>
+        </div>
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Time (SAST)</th>
+                <th>Currency</th>
+                <th>Impact</th>
+                <th>Event</th>
+                <th>Forecast</th>
+                <th>Previous</th>
+                <th>Affected Instruments</th>
+                <th>Time to Event</th>
+              </tr>
+            </thead>
+            <tbody id="calendar-tbody">
+              <tr><td colspan="8" class="text-center">Loading events...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 2. Notification History Tab -->
+      <section id="tab-alerts" class="tab-pane">
+        <div class="pane-header">
+          <h3>30-Minute Notification Audit Trail</h3>
+          <p class="pane-desc">Persistent SQLite record of all alerts dispatched to Telegram.</p>
+        </div>
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Dispatched (SAST)</th>
+                <th>Status</th>
+                <th>Event Title</th>
+                <th>Notice Advance</th>
+                <th>Channel / Recipient</th>
+              </tr>
+            </thead>
+            <tbody id="alerts-tbody">
+              <tr><td colspan="6" class="text-center">Loading notification audit...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 3. Watchlist & Currency Strength Tab -->
+      <section id="tab-watchlist" class="tab-pane">
+        <div class="pane-header">
+          <h3>Market Watchlist & Broker Quotes</h3>
+        </div>
+        <div class="watchlist-grid" id="watchlist-cards">
+          <!-- Populated by JS -->
+        </div>
+
+        <div class="pane-header" style="margin-top: 30px;">
+          <h3>Major Currency Strength Matrix</h3>
+          <p class="pane-desc">Deterministic strength scoring (0.0 to 10.0) across the 8 major currencies.</p>
+        </div>
+        <div class="strength-grid" id="strength-container">
+          <!-- Populated by JS -->
+        </div>
+      </section>
+
+      <!-- 4. Fundamental Research Tab -->
+      <section id="tab-research" class="tab-pane">
+        <div class="pane-header">
+          <h3>Macroeconomic Central Bank Research</h3>
+          <p class="pane-desc">Deterministic analysis based on verified government and central bank data.</p>
+        </div>
+        <div class="macro-theses">
+          <div class="thesis-card">
+            <h4>🥇 Gold (XAU/USD) Macro Thesis</h4>
+            <p id="thesis-gold">Loading gold thesis...</p>
+          </div>
+          <div class="thesis-card">
+            <h4>📈 Equity Indices (US30 / NAS100 / GER40) Macro Thesis</h4>
+            <p id="thesis-equities">Loading equities thesis...</p>
+          </div>
+        </div>
+        <div class="macro-grid" id="macro-cards">
+          <!-- Populated by JS -->
+        </div>
+      </section>
+
+      <!-- 5. Trading Journal Tab -->
+      <section id="tab-journal" class="tab-pane">
+        <div class="pane-header">
+          <h3>Trading Journal & Market Observations</h3>
+        </div>
+        <div class="journal-layout">
+          <form id="journal-form" class="journal-form">
+            <h4>Record Market Observation / Trade Hypothesis</h4>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Symbol</label>
+                <select id="j-symbol" class="form-control">
+                  <option value="EURUSD">EURUSD</option>
+                  <option value="GBPUSD">GBPUSD</option>
+                  <option value="USDJPY">USDJPY</option>
+                  <option value="XAUUSD">XAUUSD (Gold)</option>
+                  <option value="US30">US30 (Dow Jones)</option>
+                  <option value="NAS100">NAS100 (Nasdaq)</option>
+                  <option value="GER40">GER40 (DAX)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Action / Bias</label>
+                <select id="j-action" class="form-control">
+                  <option value="OBSERVE">OBSERVE</option>
+                  <option value="BULLISH">BULLISH BIAS</option>
+                  <option value="BEARISH">BEARISH BIAS</option>
+                  <option value="ALERT_REACTION">ALERT REACTION</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Economic Context / Catalyst</label>
+              <input type="text" id="j-context" class="form-control" placeholder="e.g. Pre-CPI consolidation, low volatility">
+            </div>
+            <div class="form-group">
+              <label>Observation & Technical Notes</label>
+              <textarea id="j-reason" class="form-control" rows="3" placeholder="Key support/resistance, reaction to release..."></textarea>
+            </div>
+            <button type="submit" class="btn btn-primary">Save Journal Entry</button>
+          </form>
+
+          <div class="journal-history">
+            <h4>Recent Observations</h4>
+            <div id="journal-list" class="journal-entries">
+              <!-- Populated by JS -->
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 6. System Logs Tab -->
+      <section id="tab-logs" class="tab-pane">
+        <div class="pane-header">
+          <h3>System Audit Trail</h3>
+        </div>
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Time (UTC)</th>
+                <th>Level</th>
+                <th>Component</th>
+                <th>Message</th>
+              </tr>
+            </thead>
+            <tbody id="logs-tbody">
+              <tr><td colspan="5" class="text-center">Loading system logs...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <div>BANDI Intelligence Platform • Local-First Architecture • Zero Paid API Dependencies</div>
+      <div>Display Timezone: <strong>Africa/Johannesburg (SAST)</strong> • Internal Storage: <strong>UTC</strong></div>
+    </footer>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
