@@ -1,13 +1,14 @@
 """
 FastAPI Server and REST API for BANDI Dashboard.
-Provides high-performance, low-memory HTTP endpoints and serves static UI assets.
+Provides high-performance, low-memory HTTP endpoints, serves static UI assets,
+and coordinates EA telemetry, order queues, decisions, and risk management.
 """
 
 from __future__ import annotations
 import time
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request, HTTPException
@@ -19,23 +20,24 @@ from bandi.config import settings
 from bandi.database.db import db
 from bandi.calendar.client import calendar_client
 from bandi.telegram.bot import telegram_notifier
+from bandi.research.fundamental_engine import fundamental_calculator
 from bandi.research.macro import fundamental_engine
 from bandi.research.currency_strength import calculate_currency_strength
 from bandi.research.watchlist import WATCHLIST_SYMBOLS, get_standard_symbol_info
 from bandi.mt5.bridge import mt5_bridge
 from bandi.mt5.risk import risk_manager
 from bandi.mt5.compiler import mql5_compiler
+from bandi.engine.decision import decision_engine
 
 logger = logging.getLogger("bandi.dashboard")
 
 app = FastAPI(
     title="BANDI - Trading Intelligence Platform",
-    version="1.0.0",
+    version="2.0.0",
     docs_url="/api/docs",
     redoc_url=None
 )
 
-# Static files directory
 STATIC_DIR = Path(__file__).parent / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -53,19 +55,40 @@ class TelemetryPayload(BaseModel):
     equity: Optional[float] = 0.0
     account: Optional[int] = 0
     broker: Optional[str] = "MetaTrader 5"
+    trade_mode: Optional[str] = "DEMO"
+    positions: Optional[List[Dict[str, Any]]] = None
 
 
-class JournalPayload(BaseModel):
+class OrderResultPayload(BaseModel):
+    order_id: str
+    success: bool
+    ticket: Optional[int] = 0
+    message: Optional[str] = ""
+    symbol: Optional[str] = ""
+
+
+class KillSwitchPayload(BaseModel):
+    active: bool
+
+
+class TradingModePayload(BaseModel):
+    mode: str  # OFF | SIGNALS_ONLY | APPROVAL | AUTO
+    confirmed: Optional[bool] = False
+
+
+class CandleItem(BaseModel):
     symbol: str
-    action: str
-    volume: float = 0.01
-    price: float = 0.0
-    sl: float = 0.0
-    tp: float = 0.0
-    pnl: float = 0.0
-    strategy_reason: str = ""
-    economic_context: str = ""
-    risk_assessment: str = ""
+    timeframe: str
+    candle_ts: int
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: Optional[float] = 0.0
+
+
+class CandleBatchPayload(BaseModel):
+    candles: List[CandleItem]
 
 
 # -----------------------------------------------------------------------------
@@ -80,11 +103,11 @@ async def serve_dashboard():
 
 
 # -----------------------------------------------------------------------------
-# API Routes
+# Core System & Status Endpoints
 # -----------------------------------------------------------------------------
 @app.get("/api/status")
 async def get_system_status():
-    """Retrieve full system health, timezone info, and component statuses."""
+    """Retrieve full system health, trading mode, lock state, kill switch, and component statuses."""
     now_utc = settings.now_utc()
     now_sast = settings.now_sast()
     tg_check = telegram_notifier.test_connection()
@@ -96,29 +119,173 @@ async def get_system_status():
         "time_utc": now_utc.isoformat(),
         "time_sast": now_sast.strftime("%Y-%m-%d %H:%M:%S SAST"),
         "timezone": settings.DISPLAY_TIMEZONE_NAME,
+        "trading_mode": settings.TRADING_MODE,
+        "trading_locked": settings.RISK_TRADING_LOCKED,
+        "kill_switch_active": settings.is_kill_switch_active(),
+        "live_trading_confirmed": settings.LIVE_TRADING_CONFIRMED,
         "telegram": {
             "enabled": settings.TELEGRAM_ENABLED,
             "connected": tg_check.get("ok", False),
             "username": tg_check.get("username", "Unconfigured"),
-            "chat_id": settings.TELEGRAM_CHAT_ID[:4] + "***" if settings.TELEGRAM_CHAT_ID else "None",
-            "details": tg_check
+            "chat_id": settings.TELEGRAM_CHAT_ID[:4] + "***" if settings.TELEGRAM_CHAT_ID else "None"
         },
         "mt5": mt5_stat,
         "risk": risk_manager.get_status()
     }
 
 
+@app.post("/api/kill-switch")
+async def toggle_kill_switch(payload: KillSwitchPayload):
+    """Emergency kill switch toggle."""
+    settings.set_kill_switch(payload.active)
+    action_str = "ACTIVATED" if payload.active else "DEACTIVATED"
+    db.log("WARNING" if payload.active else "INFO", "KILL_SWITCH", f"Emergency kill switch {action_str} via dashboard.")
+    return {"status": "ok", "kill_switch_active": settings.is_kill_switch_active()}
+
+
+@app.post("/api/trading-mode")
+async def set_trading_mode(payload: TradingModePayload):
+    """Update execution mode (OFF, SIGNALS_ONLY, APPROVAL, AUTO)."""
+    mode = payload.mode.upper().strip()
+    if mode not in ("OFF", "SIGNALS_ONLY", "APPROVAL", "AUTO"):
+        raise HTTPException(status_code=400, detail="Invalid trading mode.")
+
+    # Guard live accounts from entering AUTO without explicit confirmation
+    if mode == "AUTO" and not settings.MT5_DEMO_MODE and not payload.confirmed:
+        raise HTTPException(status_code=403, detail="Live trading confirmation required to switch to AUTO.")
+
+    settings.TRADING_MODE = mode
+    db.log("INFO", "CONFIG", f"Trading mode updated to {mode}")
+    return {"status": "ok", "trading_mode": settings.TRADING_MODE}
+
+
+# -----------------------------------------------------------------------------
+# MT5 Integration & Execution Endpoints
+# -----------------------------------------------------------------------------
+@app.post("/api/mt5/sync")
+async def ingest_mt5_telemetry(payload: TelemetryPayload):
+    """Telemetry sync endpoint called by Bandi.mq5 every few seconds."""
+    res = mt5_bridge.ingest_telemetry(payload.model_dump())
+    return res
+
+
+@app.get("/api/mt5/orders/pending")
+async def get_pending_orders():
+    """Retrieve pending orders for the MT5 EA to execute."""
+    orders = mt5_bridge.get_pending_orders()
+    return {"orders": orders}
+
+
+@app.post("/api/mt5/orders/result")
+async def report_order_result(payload: OrderResultPayload):
+    """Report execution outcome from MT5 EA back to the server."""
+    mt5_bridge.record_order_result(payload.model_dump())
+    status = "FILLED" if payload.success else "REJECTED"
+    db.update_order_status(
+        order_id=payload.order_id,
+        status=status,
+        ticket=payload.ticket if payload.success else None,
+        error=payload.message if not payload.success else None
+    )
+    if payload.success:
+        telegram_notifier.send_order_notice(
+            {"direction": "EXECUTION", "symbol": payload.symbol or "MT5", "volume": 0.01, "sl": "Verified", "tp": "Verified"},
+            ticket=payload.ticket or 0
+        )
+    return {"status": "ok"}
+
+
+@app.post("/api/mt5/candles")
+async def ingest_candles(payload: CandleBatchPayload):
+    """Accept streamed historical or real-time candles from MT5 EA."""
+    candles_data = [c.model_dump() for c in payload.candles]
+    count = db.upsert_candles(candles_data)
+    return {"status": "ok", "inserted": count}
+
+
+@app.post("/api/mt5/compile")
+async def compile_bandi_ea():
+    """Deploy and compile Bandi.mq5 across detected MetaTrader 5 installations."""
+    res = mql5_compiler.compile_ea()
+    return res
+
+
+# -----------------------------------------------------------------------------
+# Signals & Decisions Endpoints
+# -----------------------------------------------------------------------------
+@app.get("/api/signals")
+async def get_signals():
+    """Retrieve active trade signals."""
+    active = db.get_active_signals()
+    return {"count": len(active), "signals": active}
+
+
+@app.post("/api/signals/{signal_id}/approve")
+async def approve_signal(signal_id: str):
+    """Manual dashboard approval for a pending signal."""
+    sig = db.get_signal(signal_id)
+    if not sig:
+        raise HTTPException(status_code=404, detail="Signal not found.")
+
+    if int(time.time()) > sig["expiry_ts"]:
+        raise HTTPException(status_code=400, detail="Signal has expired.")
+
+    db.update_signal_status(signal_id, "APPROVED")
+    ord_id = mt5_bridge.queue_order({
+        "signal_id": signal_id,
+        "symbol": sig["symbol"],
+        "direction": sig["direction"],
+        "volume": settings.MAX_LOT,
+        "entry_price": sig["entry_price"],
+        "sl": sig["sl"],
+        "tp": sig["tp"]
+    })
+    db.save_order({
+        "order_id": ord_id,
+        "signal_id": signal_id,
+        "symbol": sig["symbol"],
+        "direction": sig["direction"],
+        "volume": settings.MAX_LOT,
+        "entry_price": sig["entry_price"],
+        "sl": sig["sl"],
+        "tp": sig["tp"],
+        "status": "PENDING"
+    })
+    return {"status": "approved", "order_id": ord_id}
+
+
+@app.post("/api/signals/{signal_id}/skip")
+async def skip_signal(signal_id: str):
+    """Manual dashboard skip for a pending signal."""
+    db.update_signal_status(signal_id, "SKIPPED")
+    return {"status": "skipped"}
+
+
+@app.get("/api/decisions")
+async def get_decisions(limit: int = 50):
+    """Retrieve audit history of trade decisions (TRADE, WATCH, SKIP)."""
+    decisions = db.get_recent_decisions(limit=limit)
+    return {"count": len(decisions), "decisions": decisions}
+
+
+@app.get("/api/performance")
+async def get_performance():
+    """Retrieve system trading performance statistics."""
+    perf = db.get_performance_metrics()
+    return perf
+
+
+# -----------------------------------------------------------------------------
+# Economic Calendar & Research Endpoints
+# -----------------------------------------------------------------------------
 @app.get("/api/calendar/events")
 async def get_calendar_events(impact: Optional[str] = None, limit: int = 50):
-    """Retrieve scheduled economic events."""
     now_ts = int(time.time())
-    # Retrieve past 12h to next 7 days
     events = db.get_upcoming_events(
         from_ts=now_ts - 43200,
         to_ts=now_ts + (settings.CALENDAR_RANGE_DAYS * 86400),
         high_impact_only=(impact == "high")
     )
-    # Add human readable SAST time and time remaining
     for ev in events:
         ev["release_time_sast"] = settings.ts_to_sast_str(ev["event_ts"])
         ev["seconds_remaining"] = ev["event_ts"] - now_ts
@@ -129,7 +296,6 @@ async def get_calendar_events(impact: Optional[str] = None, limit: int = 50):
 
 @app.get("/api/calendar/next")
 async def get_next_high_impact_event():
-    """Return the very next scheduled high-impact release and exact seconds countdown."""
     now_ts = int(time.time())
     events = db.get_upcoming_events(
         from_ts=now_ts,
@@ -150,14 +316,12 @@ async def get_next_high_impact_event():
 
 @app.post("/api/calendar/sync")
 async def sync_calendar():
-    """Trigger on-demand economic calendar sync."""
     res = calendar_client.fetch_and_sync(force=True)
     return res
 
 
 @app.get("/api/notifications")
 async def get_notifications(limit: int = 50):
-    """Retrieve history of dispatched alerts."""
     history = db.get_notification_history(limit=limit)
     for n in history:
         n["sent_time_sast"] = settings.ts_to_sast_str(n["sent_ts"])
@@ -166,31 +330,35 @@ async def get_notifications(limit: int = 50):
 
 @app.post("/api/telegram/test")
 async def send_telegram_test():
-    """Trigger a live test alert to the configured Telegram chat."""
     res = telegram_notifier.send_test_alert()
     return res
 
 
 @app.get("/api/research/overview")
 async def get_research_overview():
-    """Retrieve multi-asset fundamental research and currency strength ratings."""
-    macro = fundamental_engine.get_full_market_overview()
+    biases = fundamental_calculator.update_all_biases()
     snapshots = db.get_latest_market_snapshots()
     snapshot_map = {s["symbol"]: s for s in snapshots}
     strength = calculate_currency_strength(snapshot_map)
-    return {"macro": macro, "currency_strength": strength}
+    macro = fundamental_engine.get_full_market_overview()
+    return {
+        "macro": macro,
+        "fundamental_biases": biases,
+        "currency_strength": strength
+    }
 
 
 @app.get("/api/watchlist")
 async def get_watchlist():
-    """Retrieve prices and specs for all 12 core watchlist instruments."""
     snapshots = db.get_latest_market_snapshots()
     snapshot_dict = {s["symbol"]: s for s in snapshots}
+    biases = {b["symbol"]: b for b in db.get_fundamental_biases()}
 
     items = []
     for sym in WATCHLIST_SYMBOLS:
         info = get_standard_symbol_info(sym)
         snap = snapshot_dict.get(sym) or {}
+        bias = biases.get(sym) or {}
         items.append({
             "symbol": sym,
             "name": info.get("name", sym),
@@ -198,6 +366,8 @@ async def get_watchlist():
             "bid": snap.get("bid", 0.0),
             "ask": snap.get("ask", 0.0),
             "spread_points": snap.get("spread_points", 0.0),
+            "bias_label": bias.get("bias_label", "NEUTRAL"),
+            "bias_value": bias.get("bias_value", 0.0),
             "source": snap.get("source", "Market Watch"),
             "updated_at": snap.get("snapshot_time_utc", "Awaiting ticks")
         })
@@ -205,47 +375,7 @@ async def get_watchlist():
     return {"symbols": items}
 
 
-@app.post("/api/mt5/sync")
-async def ingest_mt5_telemetry(payload: TelemetryPayload):
-    """Receive live broker ticks and account telemetry from Bandi.mq5."""
-    res = mt5_bridge.ingest_telemetry(payload.model_dump())
-    return res
-
-
-@app.post("/api/mt5/compile")
-async def compile_bandi_ea():
-    """Deploy and compile Bandi.mq5 across detected MetaTrader 5 installations."""
-    res = mql5_compiler.compile_ea()
-    return res
-
-
 @app.get("/api/logs")
 async def get_system_logs(limit: int = 100):
-    """Retrieve audit trail of system events."""
     logs = db.get_logs(limit=limit)
     return {"count": len(logs), "logs": logs}
-
-
-@app.get("/api/journal")
-async def get_journal():
-    """Retrieve trading journal records."""
-    entries = db.get_journal_entries(limit=50)
-    return {"count": len(entries), "journal": entries}
-
-
-@app.post("/api/journal")
-async def create_journal_entry(entry: JournalPayload):
-    """Record a trade hypothesis or observation in the trading journal."""
-    record_id = db.add_journal_entry(
-        symbol=entry.symbol,
-        action=entry.action,
-        volume=entry.volume,
-        price=entry.price,
-        sl=entry.sl,
-        tp=entry.tp,
-        pnl=entry.pnl,
-        strategy_reason=entry.strategy_reason,
-        economic_context=entry.economic_context,
-        risk_assessment=entry.risk_assessment
-    )
-    return {"status": "ok", "entry_id": record_id}

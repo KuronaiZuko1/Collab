@@ -1,7 +1,8 @@
 """
 MQL5 Compiler Automation for BANDI.
 Discovers local MetaTrader 5 installations, copies Bandi.mq5 into the Experts folder,
-invokes MetaEditor64.exe to compile into Bandi.ex5, and verifies log diagnostics.
+invokes MetaEditor64.exe with standard include paths to compile into Bandi.ex5,
+and verifies log diagnostics.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ import shutil
 import subprocess
 import logging
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from bandi.config import settings
 
@@ -58,6 +59,7 @@ class MQL5Compiler:
             target_mq5 = target_dir / "Bandi.mq5"
             target_ex5 = target_dir / "Bandi.ex5"
             target_log = target_dir / "Bandi_compile.log"
+            mql5_root = target_dir.parent  # ...\MQL5
 
             # Copy source file to terminal directory
             try:
@@ -66,8 +68,8 @@ class MQL5Compiler:
                 logger.error("Failed to copy Bandi.mq5 to %s: %s", target_dir, e)
                 continue
 
-            # Execute MetaEditor compilation
-            cmd = f'"{self.metaeditor_path}" /compile:"{target_mq5}" /log:"{target_log}"'
+            # Execute MetaEditor compilation with include flag for this terminal
+            cmd = f'"{self.metaeditor_path}" /compile:"{target_mq5}" /inc:"{mql5_root}" /log:"{target_log}"'
             logger.info("Executing MetaEditor compilation: %s", cmd)
 
             try:
@@ -75,7 +77,7 @@ class MQL5Compiler:
                     cmd,
                     shell=True,
                     capture_output=True,
-                    timeout=20.0
+                    timeout=120.0
                 )
 
                 # Read log (MetaEditor produces UTF-16 log)

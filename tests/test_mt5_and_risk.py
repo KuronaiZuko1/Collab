@@ -2,6 +2,8 @@
 Unit tests for deterministic risk manager, symbol resolution, and MT5 bridge.
 """
 
+from datetime import datetime, timezone
+from bandi.config import settings
 from bandi.mt5.risk import RiskManager
 from bandi.research.watchlist import resolve_broker_symbol, get_standard_symbol_info
 from bandi.mt5.bridge import MT5Bridge
@@ -30,19 +32,50 @@ def test_risk_manager_limits_when_unlocked():
     rm.max_spread_points = 30.0
     rm.max_open_positions = 5
 
-    # Passing case
-    ok, _ = rm.check_trade_permission("EURUSD", current_spread_points=15.0, daily_drawdown_pct=1.0, open_positions_count=2, requested_volume=0.05)
-    assert ok is True
+    prev_mode = settings.TRADING_MODE
+    settings.TRADING_MODE = "AUTO"
+    test_dt = datetime(2026, 11, 10, 14, 0, tzinfo=timezone.utc)
 
-    # Spread breach
-    ok, reason = rm.check_trade_permission("EURUSD", current_spread_points=45.0, daily_drawdown_pct=1.0, open_positions_count=2, requested_volume=0.05)
-    assert ok is False
-    assert "SPREAD PROTECTION" in reason
+    try:
+        # Passing case
+        ok, reason = rm.check_trade_permission(
+            "EURUSD",
+            current_spread_points=15.0,
+            daily_drawdown_pct=1.0,
+            open_positions_count=2,
+            requested_volume=0.05,
+            sl=1.0800,
+            current_dt_utc=test_dt
+        )
+        assert ok is True, f"Expected True, got False: {reason}"
 
-    # Drawdown breach
-    ok, reason = rm.check_trade_permission("EURUSD", current_spread_points=15.0, daily_drawdown_pct=3.5, open_positions_count=2, requested_volume=0.05)
-    assert ok is False
-    assert "LIMIT BREACH" in reason
+        # Spread breach
+        ok, reason = rm.check_trade_permission(
+            "EURUSD",
+            current_spread_points=45.0,
+            daily_drawdown_pct=1.0,
+            open_positions_count=2,
+            requested_volume=0.05,
+            sl=1.0800,
+            current_dt_utc=test_dt
+        )
+        assert ok is False
+        assert "SPREAD PROTECTION" in reason
+
+        # Drawdown breach
+        ok, reason = rm.check_trade_permission(
+            "EURUSD",
+            current_spread_points=15.0,
+            daily_drawdown_pct=3.5,
+            open_positions_count=2,
+            requested_volume=0.05,
+            sl=1.0800,
+            current_dt_utc=test_dt
+        )
+        assert ok is False
+        assert "LIMIT BREACH" in reason
+    finally:
+        settings.TRADING_MODE = prev_mode
 
 
 def test_broker_symbol_resolution():
